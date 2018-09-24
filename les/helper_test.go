@@ -38,7 +38,7 @@ import (
 	"github.com/gochain-io/gochain/les/flowcontrol"
 	"github.com/gochain-io/gochain/light"
 	"github.com/gochain-io/gochain/p2p"
-	"github.com/gochain-io/gochain/p2p/discover"
+	"github.com/gochain-io/gochain/p2p/enode"
 	"github.com/gochain-io/gochain/params"
 )
 
@@ -225,7 +225,7 @@ func newTestPeer(ctx context.Context, t *testing.T, name string, version int, pm
 	app, net := p2p.MsgPipe()
 
 	// Generate a random id and create the peer
-	var id discover.NodeID
+	var id enode.ID
 	rand.Read(id[:])
 
 	peer := pm.newPeer(version, NetworkId, p2p.NewPeer(id, name, nil), net)
@@ -262,7 +262,7 @@ func newTestPeerPair(ctx context.Context, name string, version int, pm, pm2 *Pro
 	app, net := p2p.MsgPipe()
 
 	// Generate a random id and create the peer
-	var id discover.NodeID
+	var id enode.ID
 	rand.Read(id[:])
 
 	peer := pm.newPeer(version, NetworkId, p2p.NewPeer(id, name, nil), net)

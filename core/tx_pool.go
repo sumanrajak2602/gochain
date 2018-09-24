@@ -139,9 +139,10 @@ type blockChain interface {
 
 // TxPoolConfig are the configuration parameters of the transaction pool.
 type TxPoolConfig struct {
-	NoLocals  bool          `toml:",omitempty"` // Whether local transaction handling should be disabled
-	Journal   string        `toml:",omitempty"` // Journal of local transactions to survive node restarts
-	Rejournal time.Duration `toml:",omitempty"` // Time interval to regenerate the local transaction journal
+	Locals    []common.Address `toml:",omitempty"` // Addresses that should be treated by default as local
+	NoLocals  bool             `toml:",omitempty"` // Whether local transaction handling should be disabled
+	Journal   string           `toml:",omitempty"` // Journal of local transactions to survive node restarts
+	Rejournal time.Duration    `toml:",omitempty"` // Time interval to regenerate the local transaction journal
 
 	PriceLimit uint64 `toml:",omitempty"` // Minimum gas price to enforce for acceptance into the pool
 	PriceBump  uint64 `toml:",omitempty"` // Minimum price bump percentage to replace an already existing transaction (nonce)
@@ -276,6 +277,10 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		txFeedBuf:   make(chan *types.Transaction, config.GlobalSlots/4),
 	}
 	pool.locals = newAccountSet(pool.signer)
+	for _, addr := range config.Locals {
+		log.Info("Setting new local account", "address", addr)
+		pool.locals.add(addr)
+	}
 	pool.reset(ctx, nil, chain.CurrentBlock())
 
 	// If local transactions and journaling is enabled, load from disk

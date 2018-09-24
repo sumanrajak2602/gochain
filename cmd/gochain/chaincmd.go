@@ -47,7 +47,6 @@ var (
 		ArgsUsage: "<genesisPath>",
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
-			utils.LightModeFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
@@ -65,7 +64,7 @@ It expects the genesis file as argument.`,
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
 			utils.CacheFlag,
-			utils.LightModeFlag,
+			utils.SyncModeFlag,
 			utils.GCModeFlag,
 			utils.CacheDatabaseFlag,
 			utils.CacheGCFlag,
@@ -86,14 +85,43 @@ processing will proceed even if an individual RLP-file import failure occurs.`,
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
 			utils.CacheFlag,
-			utils.LightModeFlag,
+			utils.SyncModeFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
 Requires a first argument of the file to write to.
 Optional second and third arguments control the first and
 last block to write. In this mode, the file will be appended
-if already existing.`,
+if already existing. If the file ends with .gz, the output will
+be gzipped.`,
+	}
+	importPreimagesCommand = cli.Command{
+		Action:    utils.MigrateFlags(importPreimages),
+		Name:      "import-preimages",
+		Usage:     "Import the preimage database from an RLP stream",
+		ArgsUsage: "<datafile>",
+		Flags: []cli.Flag{
+			utils.DataDirFlag,
+			utils.CacheFlag,
+			utils.SyncModeFlag,
+		},
+		Category: "BLOCKCHAIN COMMANDS",
+		Description: `
+	The import-preimages command imports hash preimages from an RLP encoded stream.`,
+	}
+	exportPreimagesCommand = cli.Command{
+		Action:    utils.MigrateFlags(exportPreimages),
+		Name:      "export-preimages",
+		Usage:     "Export the preimage database into an RLP stream",
+		ArgsUsage: "<dumpfile>",
+		Flags: []cli.Flag{
+			utils.DataDirFlag,
+			utils.CacheFlag,
+			utils.SyncModeFlag,
+		},
+		Category: "BLOCKCHAIN COMMANDS",
+		Description: `
+The export-preimages command export hash preimages to an RLP encoded stream`,
 	}
 	copydbCommand = cli.Command{
 		Action:    utils.MigrateFlags(copyDb),
@@ -118,7 +146,6 @@ The first argument must be the directory containing the blockchain to download f
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
-			utils.LightModeFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
@@ -132,7 +159,7 @@ Remove blockchain and state databases`,
 		Flags: []cli.Flag{
 			utils.DataDirFlag,
 			utils.CacheFlag,
-			utils.LightModeFlag,
+			utils.SyncModeFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
@@ -145,8 +172,14 @@ Use "ethereum dump 0" to dump the genesis block.`,
 // the zero'd block (i.e. genesis) or will fail hard if it can't succeed.
 func initGenesis(ctx *cli.Context) error {
 	var genesis *core.Genesis
+	// Make sure we have a valid genesis JSON
 	genesisPath := ctx.Args().First()
-	if len(genesisPath) > 0 {
+	if len(genesisPath) == 0 {
+		genesis = utils.MakeGenesis(ctx)
+		if genesis == nil {
+			utils.Fatalf("No default genesis available.")
+		}
+	} else {
 		file, err := os.Open(genesisPath)
 		if err != nil {
 			utils.Fatalf("Failed to read genesis file: %v", err)
@@ -156,11 +189,6 @@ func initGenesis(ctx *cli.Context) error {
 		genesis = new(core.Genesis)
 		if err := json.NewDecoder(file).Decode(genesis); err != nil {
 			utils.Fatalf("invalid genesis file: %v", err)
-		}
-	} else {
-		genesis = utils.MakeGenesis(ctx)
-		if genesis == nil {
-			utils.Fatalf("No default genesis available.")
 		}
 	}
 	// Open an initialise both full and light databases
@@ -228,6 +256,13 @@ func importChain(ctx *cli.Context) error {
 			utils.Fatalf("Failed to read database stats: %v", err)
 		}
 		fmt.Println(stats)
+
+		ioStats, err := db.LDB().GetProperty("leveldb.iostats")
+		if err != nil {
+			utils.Fatalf("Failed to read database iostats: %v", err)
+		}
+		fmt.Println(ioStats)
+
 		fmt.Printf("Trie cache misses:  %d\n", trie.CacheMisses())
 		fmt.Printf("Trie cache unloads: %d\n\n", trie.CacheUnloads())
 
@@ -258,6 +293,12 @@ func importChain(ctx *cli.Context) error {
 		}
 		fmt.Println(stats)
 	*/
+
+	ioStats, err = db.LDB().GetProperty("leveldb.iostats")
+	if err != nil {
+		utils.Fatalf("Failed to read database iostats: %v", err)
+	}
+	fmt.Println(ioStats)
 
 	return nil
 }
@@ -290,7 +331,39 @@ func exportChain(ctx *cli.Context) error {
 	if err != nil {
 		utils.Fatalf("Export error: %v\n", err)
 	}
-	fmt.Printf("Export done in %v", time.Since(start))
+	fmt.Printf("Export done in %v\n", time.Since(start))
+	return nil
+}
+
+// importPreimages imports preimage data from the specified file.
+func importPreimages(ctx *cli.Context) error {
+	if len(ctx.Args()) < 1 {
+		utils.Fatalf("This command requires an argument.")
+	}
+	stack := makeFullNode(ctx)
+	diskdb := utils.MakeChainDatabase(ctx, stack).(*ethdb.LDBDatabase)
+
+	start := time.Now()
+	if err := utils.ImportPreimages(diskdb, ctx.Args().First()); err != nil {
+		utils.Fatalf("Import error: %v\n", err)
+	}
+	fmt.Printf("Import done in %v\n", time.Since(start))
+	return nil
+}
+
+// exportPreimages dumps the preimage data to specified json file in streaming way.
+func exportPreimages(ctx *cli.Context) error {
+	if len(ctx.Args()) < 1 {
+		utils.Fatalf("This command requires an argument.")
+	}
+	stack := makeFullNode(ctx)
+	diskdb := utils.MakeChainDatabase(ctx, stack).(*ethdb.LDBDatabase)
+
+	start := time.Now()
+	if err := utils.ExportPreimages(diskdb, ctx.Args().First()); err != nil {
+		utils.Fatalf("Export error: %v\n", err)
+	}
+	fmt.Printf("Export done in %v\n", time.Since(start))
 	return nil
 }
 

@@ -89,6 +89,10 @@ func (b *EthApiBackend) HeaderByNumber(ctx context.Context, blockNr rpc.BlockNum
 	return b.eth.blockchain.GetHeaderByNumber(uint64(blockNr)), nil
 }
 
+func (b *EthApiBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
+	return b.eth.blockchain.GetHeaderByHash(hash), nil
+}
+
 func (b *EthApiBackend) BlockByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Block, error) {
 	ctx, span := trace.StartSpan(ctx, "EthApiBackend.BlockByNumber")
 	defer span.End()
@@ -149,7 +153,19 @@ func (b *EthApiBackend) GetBlock(ctx context.Context, blockHash common.Hash) (*t
 func (b *EthApiBackend) GetReceipts(ctx context.Context, blockHash common.Hash) (types.Receipts, error) {
 	ctx, span := trace.StartSpan(ctx, "EthApiBackend.GetReceipts")
 	defer span.End()
-	return core.GetBlockReceipts(b.eth.chainDb.ReceiptTable(), blockHash, core.GetBlockNumber(b.eth.chainDb.GlobalTable(), blockHash)), nil
+	return b.eth.blockchain.GetReceiptsByHash(blockHash), nil
+}
+
+func (b *EthApiBackend) GetLogs(ctx context.Context, hash common.Hash) ([][]*types.Log, error) {
+	receipts := b.eth.blockchain.GetReceiptsByHash(hash)
+	if receipts == nil {
+		return nil, nil
+	}
+	logs := make([][]*types.Log, len(receipts))
+	for i, receipt := range receipts {
+		logs[i] = receipt.Logs
+	}
+	return logs, nil
 }
 
 func (b *EthApiBackend) GetTd(blockHash common.Hash) *big.Int {

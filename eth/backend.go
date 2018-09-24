@@ -32,6 +32,7 @@ import (
 	"github.com/gochain-io/gochain/consensus/clique"
 	"github.com/gochain-io/gochain/core"
 	"github.com/gochain-io/gochain/core/bloombits"
+	"github.com/gochain-io/gochain/core/rawdb"
 	"github.com/gochain-io/gochain/core/types"
 	"github.com/gochain-io/gochain/core/vm"
 	"github.com/gochain-io/gochain/eth/downloader"
@@ -60,8 +61,7 @@ type GoChain struct {
 	chainConfig *params.ChainConfig
 
 	// Channel for shutting down the service
-	shutdownChan  chan bool    // Channel for shutting down the ethereum
-	stopDbUpgrade func() error // stop chain db sequential key upgrade
+	shutdownChan chan bool // Channel for shutting down GoChain
 
 	// Handlers
 	txPool          *core.TxPool
@@ -105,12 +105,15 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 	if !config.SyncMode.IsValid() {
 		return nil, fmt.Errorf("invalid sync mode %d", config.SyncMode)
 	}
+	if config.MinerGasPrice == nil || config.MinerGasPrice.Cmp(common.Big0) <= 0 {
+		log.Warn("Sanitizing invalid miner gas price", "provided", config.MinerGasPrice, "updated", DefaultConfig.MinerGasPrice)
+		config.MinerGasPrice = new(big.Int).Set(DefaultConfig.MinerGasPrice)
+	}
+	// Assemble the GoChain object
 	chainDb, err := CreateDB(sctx, config, "chaindata")
 	if err != nil {
 		return nil, err
 	}
-
-	stopDbUpgrade := func() error { return nil } // upgradeDeduplicateData(chainDb)
 
 	chainConfig, genesisHash, genesisErr := core.SetupGenesisBlock(chainDb, config.Genesis)
 	if _, ok := genesisErr.(*params.ConfigCompatError); genesisErr != nil && !ok {
@@ -134,25 +137,28 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 		accountManager: sctx.AccountManager,
 		engine:         clique.New(chainConfig.Clique, chainDb),
 		shutdownChan:   make(chan bool),
-		stopDbUpgrade:  stopDbUpgrade,
 		networkId:      config.NetworkId,
-		gasPrice:       config.GasPrice,
+		gasPrice:       config.MinerGasPrice,
 		etherbase:      config.Etherbase,
 		bloomRequests:  make(chan chan *bloombits.Retrieval),
-		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks),
+		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
 	}
 
 	log.Info("Initialising GoChain protocol", "versions", ProtocolVersions, "network", config.NetworkId)
 
 	if !config.SkipBcVersionCheck {
-		bcVersion := core.GetBlockChainVersion(chainDb.GlobalTable())
+		bcVersion := rawdb.ReadDatabaseVersion(chainDb.GlobalTable())
 		if bcVersion != core.BlockChainVersion && bcVersion != 0 {
-			return nil, fmt.Errorf("Blockchain DB version mismatch (%d / %d). Run geth upgradedb.\n", bcVersion, core.BlockChainVersion)
+			return nil, fmt.Errorf("Blockchain DB version mismatch (%d / %d).\n", bcVersion, core.BlockChainVersion)
 		}
-		core.WriteBlockChainVersion(chainDb.GlobalTable(), core.BlockChainVersion)
+		rawdb.WriteDatabaseVersion(chainDb.GlobalTable(), core.BlockChainVersion)
 	}
 	var (
-		vmConfig    = vm.Config{EnablePreimageRecording: config.EnablePreimageRecording}
+		vmConfig = vm.Config{
+			EnablePreimageRecording: config.EnablePreimageRecording,
+			EWASMInterpreter:        config.EWASMInterpreter,
+			EVMInterpreter:          config.EVMInterpreter,
+		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
 	eth.blockchain, err = core.NewBlockChain(context.Background(), chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig)
@@ -162,12 +168,8 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 	// Rewind the chain in case of an incompatible config upgrade.
 	if compat, ok := genesisErr.(*params.ConfigCompatError); ok {
 		log.Warn("Rewinding chain to upgrade configuration", "err", compat)
-		if err := eth.blockchain.SetHead(compat.RewindTo); err != nil {
-			log.Error("Cannot set head during chain rewind", "rewind_to", compat.RewindTo, "err", err)
-		}
-		if err := core.WriteChainConfig(chainDb.GlobalTable(), genesisHash, chainConfig); err != nil {
-			log.Error("Cannot write chain config during rewind", "hash", genesisHash, "err", err)
-		}
+		eth.blockchain.SetHead(compat.RewindTo)
+		rawdb.WriteChainConfig(chainDb.GlobalTable(), genesisHash, chainConfig)
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
@@ -180,7 +182,7 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 		return nil, err
 	}
 	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine)
-	if err := eth.miner.SetExtra(makeExtraData(config.ExtraData)); err != nil {
+	if err := eth.miner.SetExtra(makeExtraData(config.MinerExtraData)); err != nil {
 		log.Error("Cannot set extra chain data", "err", err)
 	}
 
@@ -192,7 +194,7 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 	}
 	gpoParams := config.GPO
 	if gpoParams.Default == nil {
-		gpoParams.Default = config.GasPrice
+		gpoParams.Default = config.MinerGasPrice
 	}
 	eth.ApiBackend.gpo = gasprice.NewOracle(eth.ApiBackend, gpoParams)
 
@@ -313,7 +315,7 @@ func (gc *GoChain) Etherbase() (eb common.Address, err error) {
 	return common.Address{}, fmt.Errorf("etherbase must be explicitly specified")
 }
 
-// set in js console via admin interface or wrapper from cli flags
+// SetEtherbase sets the mining reward address.
 func (gc *GoChain) SetEtherbase(etherbase common.Address) {
 	gc.lock.Lock()
 	gc.etherbase = etherbase
@@ -322,32 +324,66 @@ func (gc *GoChain) SetEtherbase(etherbase common.Address) {
 	gc.miner.SetEtherbase(etherbase)
 }
 
-func (gc *GoChain) StartMining(local bool) error {
-	eb, err := gc.Etherbase()
-	if err != nil {
-		log.Error("Cannot start mining without etherbase", "err", err)
-		return fmt.Errorf("etherbase missing: %v", err)
+// StartMining starts the miner with the given number of CPU threads. If mining
+// is already running, this method adjust the number of threads allowed to use
+// and updates the minimum price required by the transaction pool.
+func (gc *GoChain) StartMining(threads int) error {
+	// Update the thread count within the consensus engine
+	type threaded interface {
+		SetThreads(threads int)
 	}
-	if clique, ok := gc.engine.(*clique.Clique); ok {
-		wallet, err := gc.accountManager.Find(accounts.Account{Address: eb})
-		if wallet == nil || err != nil {
-			log.Error("Etherbase account unavailable locally", "err", err)
-			return fmt.Errorf("signer missing: %v", err)
+	if th, ok := gc.engine.(threaded); ok {
+		log.Info("Updated mining threads", "threads", threads)
+		if threads == 0 {
+			threads = -1 // Disable the miner from within
 		}
-		clique.Authorize(eb, wallet.SignHash)
+		th.SetThreads(threads)
 	}
-	if local {
-		// If local (CPU) mining is started, we can disable the transaction rejection
-		// mechanism introduced to speed sync times. CPU mining on mainnet is ludicrous
-		// so noone will ever hit this path, whereas marking sync done on CPU mining
-		// will ensure that private networks work in single miner mode too.
+	// If the miner was not running, initialize it
+	if !gc.IsMining() {
+		// Propagate the initial price point to the transaction pool
+		gc.lock.RLock()
+		price := gc.gasPrice
+		gc.lock.RUnlock()
+		gc.txPool.SetGasPrice(context.Background(), price)
+
+		// Configure the local mining address
+		eb, err := gc.Etherbase()
+		if err != nil {
+			log.Error("Cannot start mining without etherbase", "err", err)
+			return fmt.Errorf("etherbase missing: %v", err)
+		}
+		if clique, ok := gc.engine.(*clique.Clique); ok {
+			wallet, err := gc.accountManager.Find(accounts.Account{Address: eb})
+			if wallet == nil || err != nil {
+				log.Error("Etherbase account unavailable locally", "err", err)
+				return fmt.Errorf("signer missing: %v", err)
+			}
+			clique.Authorize(eb, wallet.SignHash)
+		}
+		// If mining is started, we can disable the transaction rejection mechanism
+		// introduced to speed sync times.
 		atomic.StoreUint32(&gc.protocolManager.acceptTxs, 1)
+
+		go gc.miner.Start(eb)
 	}
-	go gc.miner.Start(eb)
 	return nil
 }
 
-func (gc *GoChain) StopMining()         { gc.miner.Stop() }
+// StopMining terminates the miner, both at the consensus engine level as well as
+// at the block creation level.
+func (gc *GoChain) StopMining() {
+	// Update the thread count within the consensus engine
+	type threaded interface {
+		SetThreads(threads int)
+	}
+	if th, ok := gc.engine.(threaded); ok {
+		th.SetThreads(-1)
+	}
+	// Stop the block creating itself
+	gc.miner.Stop()
+}
+
 func (gc *GoChain) IsMining() bool      { return gc.miner.Mining() }
 func (gc *GoChain) Miner() *miner.Miner { return gc.miner }
 
@@ -375,7 +411,7 @@ func (gc *GoChain) Protocols() []p2p.Protocol {
 // GoChain protocol implementation.
 func (gc *GoChain) Start(srvr *p2p.Server) error {
 	// Start the bloom bits servicing goroutines
-	gc.startBloomHandlers()
+	gc.startBloomHandlers(params.BloomBitsBlocks)
 
 	// Start the RPC service
 	gc.netRPCService = ethapi.NewPublicNetAPI(srvr, gc.NetVersion())
@@ -399,14 +435,7 @@ func (gc *GoChain) Start(srvr *p2p.Server) error {
 // Stop implements node.Service, terminating all internal goroutines used by the
 // GoChain protocol.
 func (gc *GoChain) Stop() error {
-	if gc.stopDbUpgrade != nil {
-		if err := gc.stopDbUpgrade(); err != nil {
-			log.Error("Cannot stop db upgrade", "err", err)
-		}
-	}
-	if err := gc.bloomIndexer.Close(); err != nil {
-		log.Error("Cannot stop bloom indexer", "err", err)
-	}
+	gc.bloomIndexer.Close()
 	gc.blockchain.Stop()
 	gc.protocolManager.Stop()
 	if gc.lesServer != nil {

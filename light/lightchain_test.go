@@ -25,6 +25,7 @@ import (
 	"github.com/gochain-io/gochain/common/hexutil"
 	"github.com/gochain-io/gochain/consensus/clique"
 	"github.com/gochain-io/gochain/core"
+	"github.com/gochain-io/gochain/core/rawdb"
 	"github.com/gochain-io/gochain/core/types"
 	"github.com/gochain-io/gochain/ethdb"
 	"github.com/gochain-io/gochain/params"
@@ -128,8 +129,8 @@ func testHeaderChainImport(ctx context.Context, chain []*types.Header, lightchai
 		}
 		// Manually insert the header into the database, but don't reorganize (allows subsequent testing)
 		lightchain.mu.Lock()
-		core.WriteTd(lightchain.chainDb.GlobalTable(), header.Hash(), header.Number.Uint64(), new(big.Int).Add(header.Difficulty, lightchain.GetTdByHash(header.ParentHash)))
-		core.WriteHeader(lightchain.chainDb.GlobalTable(), lightchain.chainDb.HeaderTable(), header)
+		rawdb.WriteTd(lightchain.chainDb.GlobalTable(), header.Hash(), header.Number.Uint64(), new(big.Int).Add(header.Difficulty, lightchain.GetTdByHash(header.ParentHash)))
+		rawdb.WriteHeader(lightchain.chainDb.GlobalTable(), lightchain.chainDb.HeaderTable(), header)
 		lightchain.mu.Unlock()
 	}
 	return nil
@@ -272,7 +273,8 @@ func makeHeaderChainWithDiff(genesis *types.Block, d []int, seed byte) []*types.
 
 type dummyOdr struct {
 	OdrBackend
-	db common.Database
+	db            common.Database
+	indexerConfig *IndexerConfig
 }
 
 func (odr *dummyOdr) Database() common.Database {
@@ -281,6 +283,10 @@ func (odr *dummyOdr) Database() common.Database {
 
 func (odr *dummyOdr) Retrieve(ctx context.Context, req OdrRequest) error {
 	return nil
+}
+
+func (odr *dummyOdr) IndexerConfig() *IndexerConfig {
+	return odr.indexerConfig
 }
 
 // Tests that reorganizing a long difficult chain after a short easy one
@@ -336,7 +342,7 @@ func TestReorgBadHeaderHashes(t *testing.T) {
 	ctx := context.Background()
 	bc := newTestLightChain()
 
-	// Create a chain, import and ban aferwards
+	// Create a chain, import and ban afterwards
 	headers := makeHeaderChainWithDiff(bc.genesisBlock, []int{1, 2, 3, 4}, 10)
 
 	if _, err := bc.InsertHeaderChain(ctx, headers, 1); err != nil {

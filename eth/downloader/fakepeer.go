@@ -22,12 +22,13 @@ import (
 
 	"github.com/gochain-io/gochain/common"
 	"github.com/gochain-io/gochain/core"
+	"github.com/gochain-io/gochain/core/rawdb"
 	"github.com/gochain-io/gochain/core/types"
 )
 
 // FakePeer is a mock downloader peer that operates on a local database instance
 // instead of being an actual live node. It's useful for testing and to implement
-// sync commands from an xisting local database.
+// sync commands from an existing local database.
 type FakePeer struct {
 	id string
 	db common.Database
@@ -48,7 +49,7 @@ func (p *FakePeer) Head() (common.Hash, *big.Int) {
 }
 
 // RequestHeadersByHash implements downloader.Peer, returning a batch of headers
-// defined by the origin hash and the associaed query parameters.
+// defined by the origin hash and the associated query parameters.
 func (p *FakePeer) RequestHeadersByHash(ctx context.Context, hash common.Hash, amount int, skip int, reverse bool) error {
 	var (
 		headers []*types.Header
@@ -92,7 +93,7 @@ func (p *FakePeer) RequestHeadersByHash(ctx context.Context, hash common.Hash, a
 }
 
 // RequestHeadersByNumber implements downloader.Peer, returning a batch of headers
-// defined by the origin number and the associaed query parameters.
+// defined by the origin number and the associated query parameters.
 func (p *FakePeer) RequestHeadersByNumber(ctx context.Context, number uint64, amount int, skip int, reverse bool) error {
 	var (
 		headers []*types.Header
@@ -123,7 +124,8 @@ func (p *FakePeer) RequestHeadersByNumber(ctx context.Context, number uint64, am
 func (p *FakePeer) RequestBodies(ctx context.Context, hashes []common.Hash) error {
 	var txs [][]*types.Transaction
 	for _, hash := range hashes {
-		block := core.GetBlock(p.db, hash, p.hc.GetBlockNumber(hash))
+		block := rawdb.ReadBlock(p.db, hash, *p.hc.GetBlockNumber(hash))
+
 		txs = append(txs, block.Transactions())
 	}
 	p.dl.DeliverBodies(p.id, txs)
@@ -135,7 +137,7 @@ func (p *FakePeer) RequestBodies(ctx context.Context, hashes []common.Hash) erro
 func (p *FakePeer) RequestReceipts(ctx context.Context, hashes []common.Hash) error {
 	var receipts [][]*types.Receipt
 	for _, hash := range hashes {
-		receipts = append(receipts, core.GetBlockReceipts(p.db.ReceiptTable(), hash, p.hc.GetBlockNumber(hash)))
+		receipts = append(receipts, rawdb.ReadReceipts(p.db.ReceiptTable(), hash, *p.hc.GetBlockNumber(hash)))
 	}
 	p.dl.DeliverReceipts(p.id, receipts)
 	return nil
