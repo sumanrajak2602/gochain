@@ -78,14 +78,15 @@ func TestStorageRangeAt(t *testing.T) {
 			want: StorageRangeResult{storageMap{keys[1]: storage[keys[1]], keys[2]: storage[keys[2]]}, &keys[3]},
 		},
 	}
-	for _, test := range tests {
+	for i, test := range tests {
 		result, err := storageRangeAt(state.StorageTrie(addr), test.start, test.limit)
 		if err != nil {
-			t.Error(err)
+			t.Errorf("test %d: failed to get result: %s", i, err)
+			continue
 		}
 		if !reflect.DeepEqual(result, test.want) {
-			t.Fatalf("wrong result for range 0x%x.., limit %d:\ngot %s\nwant %s",
-				test.start, test.limit, dumper.Sdump(result), dumper.Sdump(&test.want))
+			t.Errorf("test %d: wrong result for range 0x%x.., limit %d:\ngot %s\nwant %s",
+				i, test.start, test.limit, dumper.Sdump(result), dumper.Sdump(&test.want))
 		}
 	}
 }
